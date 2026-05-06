@@ -66,24 +66,16 @@ export async function browserExport({
   const videoSamples = demuxed.video.samples;
   const audio = demuxed.audio;
 
-  // --- Muxer ---
-  const muxerConfig = {
+  // --- Muxer (video-only for v1; audio passthrough is server-side) ---
+  const muxer = new Muxer({
     target: new ArrayBufferTarget(),
     fastStart: 'in-memory',
     video: {
-      codec: muxerVideoCodec(codec),
+      codec: 'avc',
       width,
       height,
     },
-  };
-  if (audio) {
-    muxerConfig.audio = {
-      codec: 'aac',
-      sampleRate: audio.sampleRate,
-      numberOfChannels: audio.channels,
-    };
-  }
-  const muxer = new Muxer(muxerConfig);
+  });
 
   // --- Encoder ---
   let encoderError = null;
@@ -94,17 +86,22 @@ export async function browserExport({
     },
   });
 
-  const encoderConfig = {
-    codec: encoderCodecString(codec, height),
+  // Always re-encode as constrained baseline H.264. This profile has
+  // no B-frames, which means DTS == CTS — mp4-muxer is happiest there.
+  encoder.configure({
+    codec: constrainedBaselineCodec(height),
     width,
     height,
     bitrate: 12_000_000,
     framerate: fps,
-  };
-  if (codec.startsWith('avc1') || codec.startsWith('avc3')) {
-    encoderConfig.avc = { format: 'avc' };
-  }
-  encoder.configure(encoderConfig);
+    avc: { format: 'avc' },
+    videoColorSpace: {
+      primaries: 'bt709',
+      transfer: 'bt709',
+      matrix: 'bt709',
+      fullRange: false,
+    },
+  });
 
   // --- Canvas ---
   const canvas = new OffscreenCanvas(width, height);
@@ -185,6 +182,8 @@ export async function browserExport({
   // --- Pipe video chunks ---
   for (const sample of videoSamples) {
     if (shouldCancel?.()) break;
+    if (encoderError) throw encoderError;
+    if (decoderError) throw decoderError;
     decoder.decode(
       new EncodedVideoChunk({
         type: sample.isSync ? 'key' : 'delta',
@@ -196,6 +195,7 @@ export async function browserExport({
     while (decoder.decodeQueueSize > ENCODE_QUEUE_HIGH_WATER * 4) {
       await sleep(2);
       if (decoderError) throw decoderError;
+      if (encoderError) throw encoderError;
     }
   }
 
@@ -208,20 +208,10 @@ export async function browserExport({
   if (encoderError) throw encoderError;
   if (shouldCancel?.()) return { blob: null, cancelled: true };
 
-  // --- Audio passthrough ---
-  if (audio && audio.description && audio.samples.length) {
-    for (const sample of audio.samples) {
-      const chunk = new EncodedAudioChunk({
-        type: 'key',
-        timestamp: sample.timestamp,
-        duration: sample.duration,
-        data: sample.data,
-      });
-      muxer.addAudioChunk(chunk, {
-        decoderConfig: { description: audio.description },
-      });
-    }
-  }
+  // Audio is intentionally not muxed for v1: extracting AAC's
+  // AudioSpecificConfig reliably across every source MP4 takes care
+  // we haven't done yet. The 'On server' strategy preserves audio.
+  void audio;
 
   muxer.finalize();
   return {
@@ -311,7 +301,10 @@ function demux(buffer) {
       }
       const videoDone = !out.video || videoCollected >= videoExpected;
       const audioDone = !out.audio || audioCollected >= audioExpected;
-      if (videoDone && audioDone) finalize();
+      if (videoDone && audioDone) {
+        normalizeTimestamps(out);
+        finalize();
+      }
     };
 
     const ab = buffer.slice(0);
@@ -324,6 +317,34 @@ function demux(buffer) {
       if (!resolved) reject(new Error('Demux timed out.'));
     }, 30000);
   });
+}
+
+/**
+ * mp4-muxer requires the first chunk of each track to be at timestamp 0.
+ * Source files routinely have non-zero starts (audio start offsets, edit
+ * lists, B-frame CTS reordering). We shift each track independently so
+ * its earliest sample sits at 0; absolute audio/video sync within each
+ * track is preserved relative to its own t=0.
+ */
+function normalizeTimestamps(out) {
+  if (out.video && out.video.samples.length > 0) {
+    let min = Infinity;
+    for (const s of out.video.samples) {
+      if (s.timestamp < min) min = s.timestamp;
+    }
+    if (min !== 0) {
+      for (const s of out.video.samples) s.timestamp -= min;
+    }
+  }
+  if (out.audio && out.audio.samples.length > 0) {
+    let min = Infinity;
+    for (const s of out.audio.samples) {
+      if (s.timestamp < min) min = s.timestamp;
+    }
+    if (min !== 0) {
+      for (const s of out.audio.samples) s.timestamp -= min;
+    }
+  }
 }
 
 function estimateFps(track) {
@@ -354,23 +375,14 @@ function extractDescription(file, trackId) {
 
 // --- codec helpers ---
 
-function muxerVideoCodec(codecString) {
-  if (codecString.startsWith('avc')) return 'avc';
-  if (codecString.startsWith('hvc') || codecString.startsWith('hev')) return 'hevc';
-  if (codecString.startsWith('vp09')) return 'vp9';
-  if (codecString.startsWith('av01')) return 'av1';
-  return 'avc';
-}
-
-function encoderCodecString(sourceCodec, height) {
-  // Re-encode as H.264 main/high profile for broad playback compatibility.
-  if (sourceCodec.startsWith('avc')) {
-    // Match the source profile when possible; otherwise pick a sane high profile.
-    return sourceCodec;
-  }
-  // For HEVC/VP9/AV1 source, transcode to H.264 high profile, level depends on resolution.
-  const level = height > 1080 ? '32' : height > 720 ? '28' : '1f'; // 5.0 / 4.0 / 3.1
-  return `avc1.6400${level.toUpperCase()}`;
+function constrainedBaselineCodec(height) {
+  // Constrained Baseline (avc1.42E0XX): no B-frames, broadly playable.
+  // Level depends on resolution.
+  let level;
+  if (height > 1080) level = '32'; // L5.0
+  else if (height > 720) level = '28'; // L4.0
+  else level = '1F'; // L3.1
+  return `avc1.42E0${level}`;
 }
 
 function sleep(ms) {
