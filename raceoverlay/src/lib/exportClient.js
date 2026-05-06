@@ -14,6 +14,11 @@
 
 const POLL_INTERVAL_MS = 1000;
 
+// Production sends export requests directly to a non-proxied origin
+// hostname so Cloudflare's 100 MB upload limit doesn't apply. In dev
+// we go through Vite's /api proxy.
+const API_BASE = import.meta.env.PROD ? 'https://api.race-overlay.com' : '';
+
 /**
  * @param {object} args
  * @param {File} args.videoFile
@@ -34,7 +39,10 @@ export async function exportViaBackend({
   form.append('video', videoFile, videoFile.name);
   form.append('config', JSON.stringify(config));
 
-  const startRes = await fetch('/api/export', { method: 'POST', body: form });
+  const startRes = await fetch(`${API_BASE}/api/export`, {
+    method: 'POST',
+    body: form,
+  });
   if (!startRes.ok) {
     const text = await startRes.text().catch(() => '');
     throw new Error(`Export request failed: ${startRes.status} ${text}`);
@@ -44,13 +52,13 @@ export async function exportViaBackend({
 
   while (true) {
     if (shouldCancel?.()) {
-      await fetch(`/api/export/${jobId}/cancel`, { method: 'POST' }).catch(
-        () => {}
-      );
+      await fetch(`${API_BASE}/api/export/${jobId}/cancel`, {
+        method: 'POST',
+      }).catch(() => {});
       return { blob: null, cancelled: true };
     }
 
-    const statusRes = await fetch(`/api/export/${jobId}`);
+    const statusRes = await fetch(`${API_BASE}/api/export/${jobId}`);
     if (!statusRes.ok) {
       throw new Error(`Status check failed: ${statusRes.status}`);
     }
@@ -68,7 +76,7 @@ export async function exportViaBackend({
     await sleep(POLL_INTERVAL_MS);
   }
 
-  const resultRes = await fetch(`/api/export/${jobId}/result`);
+  const resultRes = await fetch(`${API_BASE}/api/export/${jobId}/result`);
   if (!resultRes.ok) {
     throw new Error(`Could not download result: ${resultRes.status}`);
   }
