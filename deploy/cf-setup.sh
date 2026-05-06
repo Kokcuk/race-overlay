@@ -53,13 +53,26 @@ echo "==> Upserting DNS A records"
 upsert_a_record "race-overlay.com" "$DEPLOY_HOST"
 upsert_a_record "www.race-overlay.com" "$DEPLOY_HOST"
 
+try_setting() {
+  local key="$1"
+  local body="$2"
+  local resp
+  resp=$(curl -s -X PATCH "${AUTH[@]}" "$API/zones/$ZONE_ID/settings/$key" --data "$body")
+  local ok
+  ok=$(printf '%s' "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('success'))")
+  if [[ "$ok" != "True" ]]; then
+    echo "  WARN: setting $key failed (token may lack Zone Settings:Edit): $resp" >&2
+    return 1
+  fi
+}
+
 echo "==> Setting SSL mode = flexible"
-curl -s -X PATCH "${AUTH[@]}" "$API/zones/$ZONE_ID/settings/ssl" \
-  --data '{"value":"flexible"}' >/dev/null
+try_setting ssl '{"value":"flexible"}' || \
+  echo "  Set SSL mode manually in the CF dashboard: SSL/TLS -> Overview -> Flexible." >&2
 
 echo "==> Setting Always Use HTTPS = on"
-curl -s -X PATCH "${AUTH[@]}" "$API/zones/$ZONE_ID/settings/always_use_https" \
-  --data '{"value":"on"}' >/dev/null
+try_setting always_use_https '{"value":"on"}' || \
+  echo "  Set 'Always Use HTTPS' manually in the CF dashboard: SSL/TLS -> Edge Certificates." >&2
 
 echo "==> Zone status:"
 curl -s "${AUTH[@]}" "$API/zones/$ZONE_ID" \
