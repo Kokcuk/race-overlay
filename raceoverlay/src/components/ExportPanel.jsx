@@ -1,17 +1,18 @@
 import { useState, useRef, useCallback } from 'react';
 
 /**
- * Side-panel card for the server-side export.
+ * Side-panel card for the export.
  *
- * Three phases shown via the same progress bar:
- *   1. Uploading (bar tracks XHR upload bytes)
- *   2. Processing (bar tracks server-reported render/encode progress)
- *   3. Downloading (bar tracks Content-Length-based blob streaming)
+ * Two strategies, switchable via a toggle:
+ *   - 'browser' (default if supported): WebCodecs in the browser. No
+ *     upload. Phase shown is "Rendering...".
+ *   - 'server': upload + ffmpeg on the backend. Phases shown are
+ *     "Uploading...", "Rendering...", "Downloading...".
  */
-export default function ExportPanel({ canExport, onExport }) {
+export default function ExportPanel({ canExport, browserSupported, onExport }) {
+  const [strategy, setStrategy] = useState(browserSupported ? 'browser' : 'server');
   const [exporting, setExporting] = useState(false);
-  const [phase, setPhase] = useState('uploading');
-  const [stage, setStage] = useState(null);
+  const [phase, setPhase] = useState('rendering');
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const cancelRef = useRef(false);
@@ -19,16 +20,15 @@ export default function ExportPanel({ canExport, onExport }) {
   const handleExport = useCallback(async () => {
     setError(null);
     setProgress(0);
-    setPhase('uploading');
-    setStage(null);
+    setPhase(strategy === 'browser' ? 'rendering' : 'uploading');
     setExporting(true);
     cancelRef.current = false;
     try {
       await onExport({
+        strategy,
         onProgress: (s) => {
           if (s.phase) setPhase(s.phase);
           if (typeof s.progress === 'number') setProgress(s.progress);
-          setStage(s.stage ?? null);
         },
         shouldCancel: () => cancelRef.current,
       });
@@ -38,24 +38,58 @@ export default function ExportPanel({ canExport, onExport }) {
       setExporting(false);
       setProgress(0);
     }
-  }, [onExport]);
+  }, [strategy, onExport]);
 
   const handleCancel = useCallback(() => {
     cancelRef.current = true;
   }, []);
 
-  const phaseLabel = describePhase(phase, stage);
-  const barColor =
+  const phaseLabel =
     phase === 'uploading'
-      ? 'bg-info'
+      ? 'Uploading…'
       : phase === 'downloading'
-        ? 'bg-primary'
-        : 'bg-success';
+        ? 'Downloading…'
+        : 'Rendering…';
 
   return (
     <div className="card panel mt-3">
       <div className="card-header py-2 px-3 small fw-semibold">Export</div>
       <div className="card-body p-2">
+        {!exporting && (
+          <div className="mb-2">
+            <div className="form-check form-check-inline small mb-0">
+              <input
+                type="radio"
+                className="form-check-input"
+                id="export-browser"
+                checked={strategy === 'browser'}
+                disabled={!browserSupported}
+                onChange={() => setStrategy('browser')}
+              />
+              <label className="form-check-label" htmlFor="export-browser">
+                In browser
+              </label>
+            </div>
+            <div className="form-check form-check-inline small mb-0">
+              <input
+                type="radio"
+                className="form-check-input"
+                id="export-server"
+                checked={strategy === 'server'}
+                onChange={() => setStrategy('server')}
+              />
+              <label className="form-check-label" htmlFor="export-server">
+                On server
+              </label>
+            </div>
+            {!browserSupported && (
+              <div className="text-muted small mt-1">
+                Your browser doesn't support WebCodecs.
+              </div>
+            )}
+          </div>
+        )}
+
         {exporting ? (
           <>
             <div
@@ -67,13 +101,16 @@ export default function ExportPanel({ canExport, onExport }) {
               aria-valuemax="100"
             >
               <div
-                className={`progress-bar ${barColor}`}
-                style={{ width: `${progress * 100}%`, transition: 'width 200ms linear' }}
+                className="progress-bar bg-success"
+                style={{
+                  width: `${progress * 100}%`,
+                  transition: 'width 200ms linear',
+                }}
               />
             </div>
             <div className="d-flex justify-content-between align-items-center small">
               <span className="text-muted">
-                {phaseLabel} ·{' '}
+                {phaseLabel}{' '}
                 <span className="font-monospace">
                   {Math.round(progress * 100)}%
                 </span>
@@ -86,30 +123,16 @@ export default function ExportPanel({ canExport, onExport }) {
                 Cancel
               </button>
             </div>
-            <div className="small text-muted mt-2">
-              {phase === 'uploading'
-                ? "Sending video to the server."
-                : phase === 'processing'
-                  ? "Server is compositing widgets and encoding."
-                  : 'Fetching the result.'}{' '}
-              Don't close the tab.
-            </div>
           </>
         ) : (
-          <>
-            <button
-              type="button"
-              className="btn btn-sm btn-success w-100 fw-semibold"
-              disabled={!canExport}
-              onClick={handleExport}
-            >
-              Export to MP4
-            </button>
-            <div className="text-muted small mt-2">
-              Uploads the video to the server, composites widgets with
-              ffmpeg, and downloads the resulting MP4.
-            </div>
-          </>
+          <button
+            type="button"
+            className="btn btn-sm btn-success w-100 fw-semibold"
+            disabled={!canExport}
+            onClick={handleExport}
+          >
+            Process and download
+          </button>
         )}
         {error && (
           <div
@@ -122,15 +145,4 @@ export default function ExportPanel({ canExport, onExport }) {
       </div>
     </div>
   );
-}
-
-function describePhase(phase, stage) {
-  if (phase === 'uploading') return 'Uploading';
-  if (phase === 'downloading') return 'Downloading';
-  if (phase === 'processing') {
-    if (stage === 'encoding') return 'Encoding';
-    if (stage === 'rendering') return 'Rendering widgets';
-    return 'Processing';
-  }
-  return 'Working';
 }

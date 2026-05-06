@@ -7,6 +7,7 @@ import DisplayObjectLayer from './components/DisplayObjectLayer.jsx';
 import { useAnimationFrame } from './hooks/useAnimationFrame.js';
 import { parseVBO } from './lib/vboParser.js';
 import { exportViaBackend } from './lib/exportClient.js';
+import { browserExport, browserExportSupported } from './lib/browserExport.js';
 import { ERROR_MESSAGES, MAX_VBO_FILE_SIZE } from './lib/constants.js';
 import {
   DEFAULT_SCENE,
@@ -183,11 +184,13 @@ export default function App() {
   }, []);
 
   const handleExport = useCallback(
-    async ({ onProgress, shouldCancel }) => {
+    async ({ strategy, onProgress, shouldCancel }) => {
       if (!videoFile) throw new Error('Add a video first.');
       if (!vboSamples) throw new Error('Add a telemetry file first.');
 
-      const result = await exportViaBackend({
+      const exportFn =
+        strategy === 'browser' ? browserExport : exportViaBackend;
+      const result = await exportFn({
         videoFile,
         config: {
           scene,
@@ -195,6 +198,11 @@ export default function App() {
           laps: vboLaps || [],
           syncOffset,
         },
+        // browserExport reads these directly; backend client wraps them in `config`.
+        scene,
+        samples: vboSamples,
+        laps: vboLaps || [],
+        syncOffset,
         onProgress,
         shouldCancel,
       });
@@ -239,6 +247,18 @@ export default function App() {
           <span className="navbar-brand mb-0 h1">Race Overlay</span>
         </div>
       </nav>
+
+      <div className="container-fluid mb-3">
+        <p className="lead text-muted mb-1">
+          Add telemetry overlays to your onboard race video.
+        </p>
+        <p className="small text-muted mb-0">
+          Drop in your <strong>onboard footage</strong> and a{' '}
+          <strong>RaceChrono <code>.vbo</code></strong> export, place a
+          speedometer, track map, and lap timer over the picture, then
+          render the final MP4 — in your browser or on the server.
+        </p>
+      </div>
 
       <div className="container-fluid">
         <div className="app-main">
@@ -305,6 +325,7 @@ export default function App() {
             />
             <ExportPanel
               canExport={Boolean(videoFile) && Boolean(vboSamples) && scene.length > 0}
+              browserSupported={browserExportSupported()}
               onExport={handleExport}
             />
           </aside>
