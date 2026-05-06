@@ -66,8 +66,8 @@ export async function browserExport({
   const videoSamples = demuxed.video.samples;
   const audio = demuxed.audio;
 
-  // --- Muxer (video-only for v1; audio passthrough is server-side) ---
-  const muxer = new Muxer({
+  // --- Muxer ---
+  const muxerConfig = {
     target: new ArrayBufferTarget(),
     fastStart: 'in-memory',
     video: {
@@ -75,7 +75,15 @@ export async function browserExport({
       width,
       height,
     },
-  });
+  };
+  if (audio && audio.description) {
+    muxerConfig.audio = {
+      codec: 'aac',
+      sampleRate: audio.sampleRate,
+      numberOfChannels: audio.channels,
+    };
+  }
+  const muxer = new Muxer(muxerConfig);
 
   // --- Encoder ---
   let encoderError = null;
@@ -224,10 +232,19 @@ export async function browserExport({
   if (encoderError) throw encoderError;
   if (shouldCancel?.()) return { blob: null, cancelled: true };
 
-  // Audio is intentionally not muxed for v1: extracting AAC's
-  // AudioSpecificConfig reliably across every source MP4 takes care
-  // we haven't done yet. The 'On server' strategy preserves audio.
-  void audio;
+  // --- Audio passthrough (no decode/re-encode → bit-identical to source) ---
+  if (audio && audio.description && audio.samples.length) {
+    const audioMeta = { decoderConfig: { description: audio.description } };
+    for (const sample of audio.samples) {
+      const chunk = new EncodedAudioChunk({
+        type: 'key',
+        timestamp: sample.timestamp,
+        duration: sample.duration,
+        data: sample.data,
+      });
+      muxer.addAudioChunk(chunk, audioMeta);
+    }
+  }
 
   muxer.finalize();
   return {
@@ -276,12 +293,16 @@ function demux(buffer) {
       }
       if (at) {
         audioExpected = at.nb_samples;
+        const sampleRate = at.audio?.sample_rate || 48000;
+        const channels = at.audio?.channel_count || 2;
         out.audio = {
           trackId: at.id,
           timescale: at.timescale,
-          sampleRate: at.audio?.sample_rate || 48000,
-          channels: at.audio?.channel_count || 2,
-          description: extractDescription(file, at.id),
+          sampleRate,
+          channels,
+          description:
+            extractAudioSpecificConfig(file, at.id) ||
+            synthesizeAacAsc(sampleRate, channels),
           samples: [],
         };
         file.setExtractionOptions(at.id, null, { nbSamples: 1000 });
@@ -374,19 +395,80 @@ function estimateFps(track) {
   return 30;
 }
 
+/**
+ * Video codec config (avcC / hvcC / vpcC / av1C). The serialized box
+ * starts with an 8-byte box header (size + 4-char type) which the
+ * decoders expect stripped.
+ */
 function extractDescription(file, trackId) {
   const trak = file.getTrackById(trackId);
   if (!trak) return null;
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
-    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C || entry.esds;
+    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
     if (box) {
       const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
       box.write(stream);
-      // mp4box prepends an 8-byte box header (size + type) — strip it.
       return new Uint8Array(stream.buffer, 8);
     }
   }
   return null;
+}
+
+/**
+ * AAC AudioSpecificConfig is buried inside esds → ES_Descriptor →
+ * DecoderConfigDescriptor → DecoderSpecificInfo. mp4box parses the
+ * descriptor tree for us; we walk it and pull the bytes from the
+ * DecoderSpecificInfo (tag 0x05).
+ */
+function extractAudioSpecificConfig(file, trackId) {
+  const trak = file.getTrackById(trackId);
+  if (!trak) return null;
+  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+    if (!entry.esds || !entry.esds.esd) continue;
+    const dsi = findDescriptorByTag(entry.esds.esd, 0x05);
+    if (dsi && dsi.data) {
+      // Could be Uint8Array, ArrayBuffer, or array — normalize.
+      if (dsi.data instanceof Uint8Array) return dsi.data;
+      if (dsi.data instanceof ArrayBuffer) return new Uint8Array(dsi.data);
+      if (Array.isArray(dsi.data)) return new Uint8Array(dsi.data);
+    }
+  }
+  return null;
+}
+
+function findDescriptorByTag(desc, tag) {
+  if (!desc) return null;
+  if (desc.tag === tag) return desc;
+  if (Array.isArray(desc.descs)) {
+    for (const d of desc.descs) {
+      const r = findDescriptorByTag(d, tag);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a 2-byte AAC-LC AudioSpecificConfig from sample rate + channel
+ * count. Used as a fallback when the source's esds doesn't expose a
+ * DecoderSpecificInfo we can read.
+ *
+ * Layout (MPEG-4 ISO/IEC 14496-3):
+ *   audio_object_type    (5 bits) — 2 = AAC-LC
+ *   sampling_freq_index  (4 bits)
+ *   channel_config       (4 bits)
+ */
+function synthesizeAacAsc(sampleRate, channels) {
+  const RATE_TABLE = [
+    96000, 88200, 64000, 48000, 44100, 32000,
+    24000, 22050, 16000, 12000, 11025, 8000, 7350,
+  ];
+  let idx = RATE_TABLE.indexOf(sampleRate);
+  if (idx < 0) idx = 4; // default 44100
+  const objectType = 2; // AAC-LC
+  const channelCfg = Math.max(1, Math.min(7, channels));
+  const bits = (objectType << 11) | (idx << 7) | (channelCfg << 3);
+  return new Uint8Array([(bits >> 8) & 0xff, bits & 0xff]);
 }
 
 // --- codec helpers ---
