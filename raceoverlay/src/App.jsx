@@ -9,6 +9,7 @@ import { parseVBO } from './lib/vboParser.js';
 import { exportViaBackend } from './lib/exportClient.js';
 import { browserExport, browserExportSupported } from './lib/browserExport.js';
 import { ERROR_MESSAGES, MAX_VBO_FILE_SIZE } from './lib/constants.js';
+import { EXPORT_STRATEGY } from './config.js';
 import {
   DEFAULT_SCENE,
   getDisplayObjectById,
@@ -184,12 +185,16 @@ export default function App() {
   }, []);
 
   const handleExport = useCallback(
-    async ({ strategy, onProgress, shouldCancel }) => {
+    async ({ onProgress, shouldCancel }) => {
       if (!videoFile) throw new Error('Add a video first.');
       if (!vboSamples) throw new Error('Add a telemetry file first.');
 
-      const exportFn =
-        strategy === 'browser' ? browserExport : exportViaBackend;
+      // Strategy comes from config; auto-fallback to server if the
+      // browser doesn't support WebCodecs.
+      const useBrowser =
+        EXPORT_STRATEGY === 'browser' && browserExportSupported();
+      const exportFn = useBrowser ? browserExport : exportViaBackend;
+
       const result = await exportFn({
         videoFile,
         config: {
@@ -212,7 +217,7 @@ export default function App() {
       const a = document.createElement('a');
       a.href = url;
       const base = (videoFileName || 'export').replace(/\.[^/.]+$/, '');
-      a.download = `${base}-overlay.mp4`;
+      a.download = `${base}-race-overlay.mp4`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -253,10 +258,9 @@ export default function App() {
           Add telemetry overlays to your onboard race video.
         </p>
         <p className="small text-muted mb-0">
-          Drop in your <strong>onboard footage</strong> and a{' '}
-          <strong>RaceChrono <code>.vbo</code></strong> export, place a
-          speedometer, track map, and lap timer over the picture, then
-          render the final MP4 — in your browser or on the server.
+          Drop in your video plus a <strong>RaceChrono <code>.vbo</code></strong>{' '}
+          export, drag a speedometer, track map, and lap timer onto the
+          picture, and download the final MP4 with widgets baked in.
         </p>
       </div>
 
@@ -325,7 +329,6 @@ export default function App() {
             />
             <ExportPanel
               canExport={Boolean(videoFile) && Boolean(vboSamples) && scene.length > 0}
-              browserSupported={browserExportSupported()}
               onExport={handleExport}
             />
           </aside>
