@@ -1,0 +1,3 @@
+I want to build a frontend page where you can upload MP4 video (see examples) and VBO raceCharono export file (see examples) so I can extract speed from the VBO and add it as overlay on the video. 
+Invesnt some way how can I sync VBO start with video start
+As a result I want to see a video on page with the overlay speed as number 

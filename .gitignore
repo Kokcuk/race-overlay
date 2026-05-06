@@ -1,0 +1,31 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# SSH keys (deploy only — kept out of repo)
+.ssh/
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large media — example session is huge; commit just the small VBO
+examples/*.mp4
+
+# Claude Code local-only files
+.claude/settings.local.json
+.claude/agent-memory/
