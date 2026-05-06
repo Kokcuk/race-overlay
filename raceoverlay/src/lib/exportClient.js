@@ -1,15 +1,13 @@
 /**
  * Client for the backend export API.
  *
- * Flow:
- *   1. POST /api/export with the source File + a JSON config (scene,
- *      samples, laps, syncOffset). Returns { jobId }.
- *   2. Poll GET /api/export/:id until state is 'done', 'failed', or
- *      'cancelled'.
- *   3. On 'done', GET /api/export/:id/result to download the MP4.
+ * Three phases reported via onProgress:
+ *   - phase 'uploading'   — bytes-uploaded / total
+ *   - phase 'processing'  — server-side render + encode (polled)
+ *   - phase 'downloading' — fetching the resulting MP4
  *
- * Cancellation: if the caller signals via shouldCancel(), POST
- *   /api/export/:id/cancel and stop polling.
+ * Upload uses XMLHttpRequest because fetch() can't expose
+ * upload.onprogress in current browsers.
  */
 
 const POLL_INTERVAL_MS = 1000;
@@ -23,9 +21,9 @@ const API_BASE = import.meta.env.PROD ? 'https://api.race-overlay.com' : '';
  * @param {object} args
  * @param {File} args.videoFile
  * @param {object} args.config           — { scene, samples, laps, syncOffset }
- * @param {(s:{ state:string, stage:string, progress:number }) => void} [args.onProgress]
+ * @param {(s:{ phase:string, progress:number, stage?:string }) => void} [args.onProgress]
  * @param {() => boolean} [args.shouldCancel]
- * @returns {Promise<{ blob: Blob, cancelled: boolean }>}
+ * @returns {Promise<{ blob: Blob|null, cancelled: boolean }>}
  */
 export async function exportViaBackend({
   videoFile,
@@ -39,17 +37,22 @@ export async function exportViaBackend({
   form.append('video', videoFile, videoFile.name);
   form.append('config', JSON.stringify(config));
 
-  const startRes = await fetch(`${API_BASE}/api/export`, {
-    method: 'POST',
-    body: form,
-  });
-  if (!startRes.ok) {
-    const text = await startRes.text().catch(() => '');
-    throw new Error(`Export request failed: ${startRes.status} ${text}`);
+  // --- Phase 1: upload ---
+  onProgress?.({ phase: 'uploading', progress: 0 });
+  let jobId;
+  try {
+    const res = await uploadWithProgress(`${API_BASE}/api/export`, form, (p) => {
+      onProgress?.({ phase: 'uploading', progress: p });
+    });
+    const parsed = JSON.parse(res);
+    jobId = parsed.jobId;
+  } catch (e) {
+    throw new Error(`Upload failed: ${e.message}`);
   }
-  const { jobId } = await startRes.json();
   if (!jobId) throw new Error('Server did not return a job id.');
+  onProgress?.({ phase: 'uploading', progress: 1 });
 
+  // --- Phase 2: poll for processing completion ---
   while (true) {
     if (shouldCancel?.()) {
       await fetch(`${API_BASE}/api/export/${jobId}/cancel`, {
@@ -63,7 +66,11 @@ export async function exportViaBackend({
       throw new Error(`Status check failed: ${statusRes.status}`);
     }
     const status = await statusRes.json();
-    onProgress?.(status);
+    onProgress?.({
+      phase: 'processing',
+      progress: status.progress ?? 0,
+      stage: status.stage,
+    });
 
     if (status.state === 'done') break;
     if (status.state === 'failed') {
@@ -76,12 +83,55 @@ export async function exportViaBackend({
     await sleep(POLL_INTERVAL_MS);
   }
 
+  // --- Phase 3: download result ---
+  onProgress?.({ phase: 'downloading', progress: 0 });
   const resultRes = await fetch(`${API_BASE}/api/export/${jobId}/result`);
   if (!resultRes.ok) {
     throw new Error(`Could not download result: ${resultRes.status}`);
   }
-  const blob = await resultRes.blob();
+  const blob = await streamBlobWithProgress(resultRes, (p) => {
+    onProgress?.({ phase: 'downloading', progress: p });
+  });
+  onProgress?.({ phase: 'downloading', progress: 1 });
   return { blob, cancelled: false };
+}
+
+function uploadWithProgress(url, body, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total);
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.responseText);
+      } else {
+        reject(new Error(`HTTP ${xhr.status} ${xhr.responseText.slice(0, 200)}`));
+      }
+    });
+    xhr.addEventListener('error', () => reject(new Error('network error')));
+    xhr.addEventListener('abort', () => reject(new Error('aborted')));
+    xhr.send(body);
+  });
+}
+
+async function streamBlobWithProgress(response, onProgress) {
+  const total = parseInt(response.headers.get('Content-Length') || '0', 10);
+  if (!total || !response.body) return response.blob();
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    onProgress(received / total);
+  }
+  const type = response.headers.get('Content-Type') || 'video/mp4';
+  return new Blob(chunks, { type });
 }
 
 function sleep(ms) {

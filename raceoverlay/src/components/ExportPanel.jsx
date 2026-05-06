@@ -3,28 +3,32 @@ import { useState, useRef, useCallback } from 'react';
 /**
  * Side-panel card for the server-side export.
  *
- * Shows a single button when idle. While running, displays a progress
- * bar reflecting backend-reported stage + percent and a Cancel button
- * that aborts the job server-side.
+ * Three phases shown via the same progress bar:
+ *   1. Uploading (bar tracks XHR upload bytes)
+ *   2. Processing (bar tracks server-reported render/encode progress)
+ *   3. Downloading (bar tracks Content-Length-based blob streaming)
  */
 export default function ExportPanel({ canExport, onExport }) {
   const [exporting, setExporting] = useState(false);
+  const [phase, setPhase] = useState('uploading');
+  const [stage, setStage] = useState(null);
   const [progress, setProgress] = useState(0);
-  const [stage, setStage] = useState('rendering');
   const [error, setError] = useState(null);
   const cancelRef = useRef(false);
 
   const handleExport = useCallback(async () => {
     setError(null);
     setProgress(0);
-    setStage('rendering');
+    setPhase('uploading');
+    setStage(null);
     setExporting(true);
     cancelRef.current = false;
     try {
       await onExport({
         onProgress: (s) => {
+          if (s.phase) setPhase(s.phase);
           if (typeof s.progress === 'number') setProgress(s.progress);
-          if (s.stage) setStage(s.stage);
+          setStage(s.stage ?? null);
         },
         shouldCancel: () => cancelRef.current,
       });
@@ -40,14 +44,13 @@ export default function ExportPanel({ canExport, onExport }) {
     cancelRef.current = true;
   }, []);
 
-  const stageLabel =
-    stage === 'encoding'
-      ? 'Encoding'
-      : stage === 'rendering'
-        ? 'Rendering widgets'
-        : stage === 'queued'
-          ? 'Queued'
-          : 'Working';
+  const phaseLabel = describePhase(phase, stage);
+  const barColor =
+    phase === 'uploading'
+      ? 'bg-info'
+      : phase === 'downloading'
+        ? 'bg-primary'
+        : 'bg-success';
 
   return (
     <div className="card panel mt-3">
@@ -64,13 +67,13 @@ export default function ExportPanel({ canExport, onExport }) {
               aria-valuemax="100"
             >
               <div
-                className="progress-bar bg-success"
-                style={{ width: `${progress * 100}%` }}
+                className={`progress-bar ${barColor}`}
+                style={{ width: `${progress * 100}%`, transition: 'width 200ms linear' }}
               />
             </div>
             <div className="d-flex justify-content-between align-items-center small">
               <span className="text-muted">
-                {stageLabel} ·{' '}
+                {phaseLabel} ·{' '}
                 <span className="font-monospace">
                   {Math.round(progress * 100)}%
                 </span>
@@ -84,7 +87,12 @@ export default function ExportPanel({ canExport, onExport }) {
               </button>
             </div>
             <div className="small text-muted mt-2">
-              Uploading video and rendering on the server. Don't close the tab.
+              {phase === 'uploading'
+                ? "Sending video to the server."
+                : phase === 'processing'
+                  ? "Server is compositing widgets and encoding."
+                  : 'Fetching the result.'}{' '}
+              Don't close the tab.
             </div>
           </>
         ) : (
@@ -114,4 +122,15 @@ export default function ExportPanel({ canExport, onExport }) {
       </div>
     </div>
   );
+}
+
+function describePhase(phase, stage) {
+  if (phase === 'uploading') return 'Uploading';
+  if (phase === 'downloading') return 'Downloading';
+  if (phase === 'processing') {
+    if (stage === 'encoding') return 'Encoding';
+    if (stage === 'rendering') return 'Rendering widgets';
+    return 'Processing';
+  }
+  return 'Working';
 }
