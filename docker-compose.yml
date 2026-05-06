@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: raceoverlay-backend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      PORT: "3000"
+      MAX_UPLOAD_BYTES: "4294967296"   # 4 GiB
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
+      CF_API_TOKEN: ${CF_API_TOKEN:-}
+      CF_D1_DATABASE_ID: ${CF_D1_DATABASE_ID:-}
+    volumes:
+      - backend-jobs:/tmp/raceoverlay-jobs
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: raceoverlay-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend-jobs:

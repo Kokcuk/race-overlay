@@ -133,6 +133,8 @@ APIs (File API, `<video>`, `URL.createObjectURL`) the app depends on.
 | F-12 | Error & loading states | Friendly messages near the file selectors when files are invalid or being parsed. |
 | F-13 | Hover-activated widget editing | Each widget is always interactive. While the cursor is over a widget (or while it is being dragged/resized, or it is the currently selected widget in the panel), a yellow dashed outline and a bottom-right resize handle appear; click+drag moves the widget, dragging the handle resizes it uniformly. Empty space between widgets stays click-through so clicking the bare video still plays/pauses. |
 | F-14 | Layout persistence | The current scene (the array of widget instances and their `config`) is persisted to `localStorage` under the key `raceoverlay.scene.v1`. On reload the scene is restored. Stored entries that reference unknown widget ids (e.g. after a registry change) are filtered out, and missing config fields are merged from `defaultConfig`. |
+| F-15 | Server-side MP4 export | A side-panel button below Display Objects uploads the source video + scene/samples JSON to a Node + ffmpeg backend, which renders widget overlay frames with `node-canvas` and pipes them as raw RGBA into ffmpeg's `overlay` filter, encoding H.264 + audio passthrough. Frontend polls for status, downloads the resulting MP4. Faster than real-time on a multi-core CPU. |
+| F-16 | Job persistence (Cloudflare D1) | Every export job's metadata (id, state, progress, source filename + size, output size, scene widget count, timestamps, error) is recorded in a Cloudflare D1 SQLite database via the REST API. Active progress lives in memory; D1 captures the durable record. Survives container restarts. `GET /api/jobs/recent` exposes recent history. |
 
 ### Future (Nice-to-Have)
 
@@ -234,6 +236,22 @@ my best lap time is,
 - AC-03d-e: While dragging or resizing, the chrome stays visible even if the cursor leaves the widget body.
 - AC-03d-f: Empty space between widgets passes pointer events through to the underlying video, so clicking the bare video still plays / pauses.
 - AC-03d-g: Layout changes are kept for the current session only. (Persistence is not in MVP.)
+
+### US-03e: Export the Composited Video (Server-Side)
+
+**As a** driver who has built a layout I'm happy with,
+**I want to** save the video with widgets baked into the picture,
+**So that** I can share or upload it without needing the app.
+
+- AC-03e-a: An "Export" panel sits in the right column below Display Objects.
+- AC-03e-b: The "Export to MP4" button is enabled only when a video is loaded, telemetry is loaded, and the scene is non-empty.
+- AC-03e-c: Clicking it uploads the source video + a JSON config (scene + samples + laps + syncOffset) to the backend.
+- AC-03e-d: The frontend polls a status endpoint and shows a progress bar with the current stage ("Rendering widgets" while node-canvas is generating overlay frames; "Encoding" once ffmpeg's progress lines start streaming).
+- AC-03e-e: A Cancel button aborts the running ffmpeg process server-side; the temp source file is cleaned up.
+- AC-03e-f: When complete, the browser downloads the resulting `.mp4`.
+- AC-03e-g: The output preserves the source video's audio track via `-c:a copy`.
+- AC-03e-h: Widgets look the same as the live preview because the backend reuses `canvasDraws.js` (kept in sync with the frontend copy) at the video's native resolution.
+- AC-03e-i: Every job's lifecycle (queued → processing → done/failed/cancelled) is persisted to Cloudflare D1 with timestamps and byte counts.
 
 ### US-04: Align Telemetry to Video via the Timeline
 

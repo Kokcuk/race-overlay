@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bundle source → ship to server → build + run a Docker container on :80.
-# Idempotent: re-running rebuilds from latest sources.
+# Bundle source → ship to server → docker compose up.
+# Idempotent: re-running rebuilds with the latest sources.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,10 +22,11 @@ SCP="scp $SSH_OPTS"
 
 BUNDLE=/tmp/raceoverlay-src.tar.gz
 
-echo "==> Bundling source (excluding node_modules, dist, secrets, examples)"
+echo "==> Bundling source (excluding node_modules, dist, secrets, big media)"
 tar \
   --exclude='raceoverlay/node_modules' \
   --exclude='raceoverlay/dist' \
+  --exclude='backend/node_modules' \
   --exclude='.git' \
   --exclude='.ssh' \
   --exclude='.env' \
@@ -33,10 +34,13 @@ tar \
   --exclude='examples' \
   --exclude='docs' \
   -czf "$BUNDLE" \
-  raceoverlay deploy
+  raceoverlay backend deploy docker-compose.yml
 
 echo "==> Uploading bundle ($(du -h "$BUNDLE" | cut -f1))"
 $SCP "$BUNDLE" "root@$DEPLOY_HOST:/tmp/raceoverlay-src.tar.gz"
+
+echo "==> Uploading .env (out-of-band, never in the tar bundle)"
+$SCP .env "root@$DEPLOY_HOST:/tmp/raceoverlay.env"
 
 echo "==> Installing Docker (idempotent), unpacking, building, running"
 $SSH 'bash -s' <<'REMOTE_EOF'
@@ -47,23 +51,34 @@ if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 
+if ! docker compose version >/dev/null 2>&1; then
+  echo "  Installing docker-compose-plugin..."
+  apt-get update -qq
+  apt-get install -y --no-install-recommends docker-compose-plugin
+fi
+
+# Stop any single-container deployment from earlier runs.
+docker rm -f raceoverlay >/dev/null 2>&1 || true
+
 rm -rf /opt/raceoverlay
 mkdir -p /opt/raceoverlay
 tar -xzf /tmp/raceoverlay-src.tar.gz -C /opt/raceoverlay
 rm /tmp/raceoverlay-src.tar.gz
 
-cd /opt/raceoverlay
-echo "  Building image..."
-docker build -t raceoverlay:latest -f deploy/Dockerfile .
+mv /tmp/raceoverlay.env /opt/raceoverlay/.env
+chmod 600 /opt/raceoverlay/.env
 
-echo "  Restarting container..."
-docker rm -f raceoverlay >/dev/null 2>&1 || true
-docker run -d --name raceoverlay --restart unless-stopped -p 80:80 raceoverlay:latest
+cd /opt/raceoverlay
+echo "  Building images + (re)starting compose stack..."
+docker compose down --remove-orphans 2>/dev/null || true
+docker compose build
+docker compose up -d
 
 echo "  Container status:"
-docker ps --filter name=raceoverlay --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+docker compose ps
 REMOTE_EOF
 
 rm -f "$BUNDLE"
 echo "==> Deploy complete. Smoke-test:"
 echo "    curl -I http://$DEPLOY_HOST"
+echo "    curl -s http://$DEPLOY_HOST/api/health"

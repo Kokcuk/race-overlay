@@ -17,6 +17,7 @@ and accessibility.
 4. [Component Hierarchy](#4-component-hierarchy)
 5. [Files Panel](#5-files-panel)
 5b. [Display Objects Panel](#5b-display-objects-panel)
+5c. [Export Panel](#5c-export-panel)
 6. [Video Player & Display Object Layer](#6-video-player--display-object-layer)
 7. [Display Objects Framework](#7-display-objects-framework)
 7b. [Widget Frame — drag, resize, selection](#7b-widget-frame--drag-resize-selection)

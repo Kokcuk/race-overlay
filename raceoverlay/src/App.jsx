@@ -1,10 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import FilesPanel from './components/FilesPanel.jsx';
 import DisplayObjectsPanel from './components/DisplayObjectsPanel.jsx';
+import ExportPanel from './components/ExportPanel.jsx';
 import Timeline from './components/Timeline.jsx';
 import DisplayObjectLayer from './components/DisplayObjectLayer.jsx';
 import { useAnimationFrame } from './hooks/useAnimationFrame.js';
 import { parseVBO } from './lib/vboParser.js';
+import { exportViaBackend } from './lib/exportClient.js';
 import { ERROR_MESSAGES, MAX_VBO_FILE_SIZE } from './lib/constants.js';
 import {
   DEFAULT_SCENE,
@@ -34,6 +36,7 @@ function loadScene() {
 export default function App() {
   // --- Files ---
   const [videoUrl, setVideoUrl] = useState(null);
+  const [videoFile, setVideoFile] = useState(null);
   const [videoFileName, setVideoFileName] = useState('');
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoLoading, setVideoLoading] = useState(false);
@@ -85,6 +88,7 @@ export default function App() {
   }, []);
 
   const videoRef = useRef(null);
+  const stageRef = useRef(null);
   const prevVideoUrl = useRef(null);
 
   useEffect(() => {
@@ -113,6 +117,7 @@ export default function App() {
     probe.preload = 'metadata';
     probe.onloadedmetadata = () => {
       setVideoUrl(url);
+      setVideoFile(file);
       setVideoFileName(file.name);
       setVideoDuration(probe.duration || 0);
       setVideoLoading(false);
@@ -161,6 +166,7 @@ export default function App() {
       prevVideoUrl.current = null;
     }
     setVideoUrl(null);
+    setVideoFile(null);
     setVideoFileName('');
     setVideoDuration(0);
     setVideoError(null);
@@ -175,6 +181,37 @@ export default function App() {
     setVboError(null);
     setSyncOffset(0);
   }, []);
+
+  const handleExport = useCallback(
+    async ({ onProgress, shouldCancel }) => {
+      if (!videoFile) throw new Error('Add a video first.');
+      if (!vboSamples) throw new Error('Add a telemetry file first.');
+
+      const result = await exportViaBackend({
+        videoFile,
+        config: {
+          scene,
+          samples: vboSamples,
+          laps: vboLaps || [],
+          syncOffset,
+        },
+        onProgress,
+        shouldCancel,
+      });
+      if (result.cancelled || !result.blob) return;
+
+      const url = URL.createObjectURL(result.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const base = (videoFileName || 'export').replace(/\.[^/.]+$/, '');
+      a.download = `${base}-overlay.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    [videoFile, scene, vboSamples, vboLaps, syncOffset, videoFileName]
+  );
 
   const tickVideoTime = useCallback(() => {
     const v = videoRef.current;
@@ -207,7 +244,7 @@ export default function App() {
         <div className="app-main">
           <section className="app-stage">
             {videoUrl ? (
-              <div className="video-stage mb-3">
+              <div ref={stageRef} className="video-stage mb-3">
                 <video
                   ref={videoRef}
                   src={videoUrl}
@@ -265,6 +302,10 @@ export default function App() {
               onSelect={setSelectedDisplayObjectId}
               onAdd={handleAddToScene}
               onRemove={handleRemoveFromScene}
+            />
+            <ExportPanel
+              canExport={Boolean(videoFile) && Boolean(vboSamples) && scene.length > 0}
+              onExport={handleExport}
             />
           </aside>
         </div>
