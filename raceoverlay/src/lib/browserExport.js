@@ -93,7 +93,9 @@ export async function browserExport({
     width,
     height,
     bitrate: 12_000_000,
+    bitrateMode: 'constant', // CBR — fill the target bitrate; without this VBR can collapse the file
     framerate: fps,
+    latencyMode: 'quality',
     avc: { format: 'avc' },
     videoColorSpace: {
       primaries: 'bt709',
@@ -110,17 +112,19 @@ export async function browserExport({
   const totalFrames = videoSamples.length;
   let processed = 0;
 
-  // --- Decoder feeds composite+encode in its output callback ---
+  // --- Decoder output handler ---
+  // CRITICAL: must be synchronous from drawImage through encoder.encode().
+  // If we await anywhere in this path, multiple in-flight output()
+  // invocations can race and call encoder.encode() out of order,
+  // producing non-monotonic DTS that mp4-muxer rejects.
+  // Backpressure lives on the decode loop instead (below).
   let decoderError = null;
   const decoder = new VideoDecoder({
-    output: async (frame) => {
+    output: (frame) => {
       try {
         if (shouldCancel?.()) {
           frame.close();
           return;
-        }
-        while (encoder.encodeQueueSize > ENCODE_QUEUE_HIGH_WATER) {
-          await sleep(1);
         }
 
         ctx.drawImage(frame, 0, 0, width, height);
@@ -149,14 +153,20 @@ export async function browserExport({
         const dur = frame.duration ?? Math.round(1_000_000 / fps);
         frame.close();
 
-        const composited = new VideoFrame(canvas, { timestamp: ts, duration: dur });
+        const composited = new VideoFrame(canvas, {
+          timestamp: ts,
+          duration: dur,
+        });
         const isKey = processed % Math.max(1, Math.round(fps * 2)) === 0;
         encoder.encode(composited, { keyFrame: isKey });
         composited.close();
 
         processed++;
         if (processed % 6 === 0 || processed === totalFrames) {
-          onProgress?.({ phase: 'rendering', progress: processed / totalFrames });
+          onProgress?.({
+            phase: 'rendering',
+            progress: processed / totalFrames,
+          });
         }
       } catch (e) {
         decoderError = e;
@@ -180,10 +190,21 @@ export async function browserExport({
   });
 
   // --- Pipe video chunks ---
+  // Backpressure on the decode loop, not inside the output handler:
+  // pause feeding the decoder when either queue gets long. This keeps
+  // the output handler strictly serial and monotonic.
   for (const sample of videoSamples) {
     if (shouldCancel?.()) break;
     if (encoderError) throw encoderError;
     if (decoderError) throw decoderError;
+    while (
+      decoder.decodeQueueSize > ENCODE_QUEUE_HIGH_WATER ||
+      encoder.encodeQueueSize > ENCODE_QUEUE_HIGH_WATER
+    ) {
+      await sleep(2);
+      if (decoderError) throw decoderError;
+      if (encoderError) throw encoderError;
+    }
     decoder.decode(
       new EncodedVideoChunk({
         type: sample.isSync ? 'key' : 'delta',
@@ -192,11 +213,6 @@ export async function browserExport({
         data: sample.data,
       })
     );
-    while (decoder.decodeQueueSize > ENCODE_QUEUE_HIGH_WATER * 4) {
-      await sleep(2);
-      if (decoderError) throw decoderError;
-      if (encoderError) throw encoderError;
-    }
   }
 
   await decoder.flush();
